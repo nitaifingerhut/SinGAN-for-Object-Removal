@@ -130,7 +130,7 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
 
             if opt.norm == 0:
                 output = netD(real).to(opt.device)
-            else if opt.norm == 1:
+            elif opt.norm == 1:
                 output = netD(real).to(opt.device) * discriminators_mask
             else:
                 raise TypeError("valid normalization modes are 0,1.")
@@ -184,7 +184,7 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
 
             if opt.norm == 0:
                 gradient_penalty = functions.calc_gp(netD, real, fake, opt.lambda_grad, opt.device)
-            else if opt.norm == 1:
+            elif opt.norm == 1:
                 gradient_penalty = functions.calc_normalized_gp(netD, real, fake, opt.lambda_grad, opt.device, discriminators_mask)
             else:
                 raise TypeError("valid normalization modes are 0,1.")
@@ -215,7 +215,7 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
                 netG_out = netG(Z_opt.detach(),z_prev)
                 if opt.norm == 0:
                     pass
-                else if opt.norm == 1:
+                elif opt.norm == 1:
                     netG_out = netG_out * discriminators_mask
                     real = real * discriminators_mask
                 else:
