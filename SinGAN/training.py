@@ -216,8 +216,8 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
                 if opt.norm == 0:
                     pass
                 elif opt.norm == 1:
-                    netG_out = netG_out * discriminators_mask
-                    real = real * discriminators_mask
+                    netG_out = netG_out * mask
+                    real = real * mask
                 else:
                     raise TypeError("valid normalization modes are 0,1.")
                 rec_loss = alpha*loss(netG_out,real)
