@@ -14,6 +14,7 @@ def train(opt,Gs,Zs,reals,NoiseAmp):
     scale_num = 0
     real = imresize(real_,opt.scale1,opt)
     reals = functions.creat_reals_pyramid(real,reals,opt)
+    masks = functions.create_masks_pyramid(real,masks,opt)
     nfc_prev = 0
 
     while scale_num<opt.stop_scale+1:
@@ -36,7 +37,7 @@ def train(opt,Gs,Zs,reals,NoiseAmp):
             G_curr.load_state_dict(torch.load('%s/%d/netG.pth' % (opt.out_,scale_num-1)))
             D_curr.load_state_dict(torch.load('%s/%d/netD.pth' % (opt.out_,scale_num-1)))
 
-        z_curr,in_s,G_curr = train_single_scale(D_curr,G_curr,reals,Gs,Zs,in_s,NoiseAmp,opt)
+        z_curr,in_s,G_curr = train_single_scale(D_curr,G_curr,reals,masks,Gs,Zs,in_s,NoiseAmp,opt)
 
         G_curr = functions.reset_grads(G_curr,False)
         G_curr.eval()
@@ -59,9 +60,10 @@ def train(opt,Gs,Zs,reals,NoiseAmp):
 
 
 
-def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
+def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
 
     real = reals[len(Gs)]
+    mask = masks[len(Gs)]
     opt.nzx = real.shape[2]#+(opt.ker_size-1)*(opt.num_layer)
     opt.nzy = real.shape[3]#+(opt.ker_size-1)*(opt.num_layer)
     opt.receptive_field = opt.ker_size + ((opt.ker_size-1)*(opt.num_layer-1))*opt.stride
@@ -75,6 +77,21 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
     m_image = nn.ZeroPad2d(int(pad_image))
 
     alpha = opt.alpha
+
+    # Here we calculate the decrease in output size due to conv layers.
+    # required for setting the size of discriminators map.
+    # TODO: currently, calculation doesn't consider opt.stride
+    if (opt.ker_size % 2 == 0):
+        r = (opt.num_layer)*(opt.ker_size-1)
+    else: #(opt.ker_size % 2 != 0):
+        r = (opt.num_layer)*(opt.ker_size-1)/2
+    r = int(r)
+
+    _, _, h, w = mask.size()
+    discriminators_mask = mask.detach()[:,:,r:h-r,r:w-r][:,0,:,:].unsqueeze(0)
+    _, _, h, w = discriminators_mask.size()
+    m_ratio = (h * w) / discriminators_mask.sum().item()
+    discriminators_mask = discriminators_mask * m_ratio # normalize the discriminators mask
 
     fixed_noise = functions.generate_noise([opt.nc_z,opt.nzx,opt.nzy],device=opt.device)
     z_opt = torch.full(fixed_noise.shape, 0, device=opt.device)
@@ -92,10 +109,12 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
     D_fake2plot = []
     z_opt2plot = []
 
+    plt.imsave('%s/mask.png'   % (opt.outf), functions.convert_image_np(real*mask))
     for epoch in range(opt.niter):
         if (Gs == []) & (opt.mode != 'SR_train'):
-            z_opt = functions.generate_noise([1,opt.nzx,opt.nzy], device=opt.device)
-            z_opt = m_noise(z_opt.expand(1,3,opt.nzx,opt.nzy))
+            if (epoch == 0):
+                z_opt = functions.generate_noise([1,opt.nzx,opt.nzy], device=opt.device)
+                z_opt = m_noise(z_opt.expand(1,3,opt.nzx,opt.nzy))
             noise_ = functions.generate_noise([1,opt.nzx,opt.nzy], device=opt.device)
             noise_ = m_noise(noise_.expand(1,3,opt.nzx,opt.nzy))
         else:
@@ -109,7 +128,12 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
             # train with real
             netD.zero_grad()
 
-            output = netD(real).to(opt.device)
+            if opt.norm == 0:
+                output = netD(real).to(opt.device)
+            else if opt.norm == 1:
+                output = netD(real).to(opt.device) * discriminators_mask
+            else:
+                raise TypeError("valid normalization modes are 0,1.")
             #D_real_map = output.detach()
             errD_real = -output.mean()#-a
             errD_real.backward(retain_graph=True)
@@ -158,7 +182,13 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
             errD_fake.backward(retain_graph=True)
             D_G_z = output.mean().item()
 
-            gradient_penalty = functions.calc_gradient_penalty(netD, real, fake, opt.lambda_grad, opt.device)
+            if opt.norm == 0:
+                gradient_penalty = functions.calc_gp(netD, real, fake, opt.lambda_grad, opt.device)
+            else if opt.norm == 1:
+                gradient_penalty = functions.calc_normalized_gp(netD, real, fake, opt.lambda_grad, opt.device, discriminators_mask)
+            else:
+                raise TypeError("valid normalization modes are 0,1.")
+
             gradient_penalty.backward()
 
             errD = errD_real + errD_fake + gradient_penalty
@@ -182,7 +212,15 @@ def train_single_scale(netD,netG,reals,Gs,Zs,in_s,NoiseAmp,opt,centers=None):
                     z_prev = functions.quant2centers(z_prev, centers)
                     plt.imsave('%s/z_prev.png' % (opt.outf), functions.convert_image_np(z_prev), vmin=0, vmax=1)
                 Z_opt = opt.noise_amp*z_opt+z_prev
-                rec_loss = alpha*loss(netG(Z_opt.detach(),z_prev),real)
+                netG_out = netG(Z_opt.detach(),z_prev)
+                if opt.norm == 0:
+                    pass
+                else if opt.norm == 1:
+                    netG_out = netG_out * discriminators_mask
+                    real = real * discriminators_mask
+                else:
+                    raise TypeError("valid normalization modes are 0,1.")
+                rec_loss = alpha*loss(netG_out,real)
                 rec_loss.backward(retain_graph=True)
                 rec_loss = rec_loss.detach()
             else:

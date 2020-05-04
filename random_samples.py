@@ -36,14 +36,14 @@ if __name__ == '__main__':
             pass
         if opt.mode == 'random_samples':
             real = functions.read_image(opt)
-            functions.adjust_scales2image(real, opt)
+            functions.adjust_scales2image_RS(real, opt)
             Gs, Zs, reals, NoiseAmp = functions.load_trained_pyramid(opt)
             in_s = functions.generate_in2coarsest(reals,1,1,opt)
             SinGAN_generate(Gs, Zs, reals, NoiseAmp, opt, gen_start_scale=opt.gen_start_scale)
 
         elif opt.mode == 'random_samples_arbitrary_sizes':
             real = functions.read_image(opt)
-            functions.adjust_scales2image(real, opt)
+            functions.adjust_scales2image_RS(real, opt)
             Gs, Zs, reals, NoiseAmp = functions.load_trained_pyramid(opt)
             in_s = functions.generate_in2coarsest(reals,opt.scale_v,opt.scale_h,opt)
             SinGAN_generate(Gs, Zs, reals, NoiseAmp, opt, in_s, scale_v=opt.scale_v, scale_h=opt.scale_h)

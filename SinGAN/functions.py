@@ -124,7 +124,7 @@ def move_to_cpu(t):
     t = t.to(torch.device('cpu'))
     return t
 
-def calc_gradient_penalty(netD, real_data, fake_data, LAMBDA, device):
+def calc_gp(netD, real_data, fake_data, LAMBDA, device):
     #print real_data.size()
     alpha = torch.rand(1, 1)
     alpha = alpha.expand(real_data.size())
@@ -137,6 +137,29 @@ def calc_gradient_penalty(netD, real_data, fake_data, LAMBDA, device):
     interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
 
     disc_interpolates = netD(interpolates)
+
+    gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
+                              grad_outputs=torch.ones(disc_interpolates.size()).to(device),#.cuda(), #if use_cuda else torch.ones(
+                                  #disc_interpolates.size()),
+                              create_graph=True, retain_graph=True, only_inputs=True)[0]
+    #LAMBDA = 1
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * LAMBDA
+    return gradient_penalty
+
+def calc_normalized_gp(netD, real_data, fake_data, LAMBDA, device, normalized_mask):
+    #print real_data.size()
+    alpha = torch.rand(1, 1)
+    alpha = alpha.expand(real_data.size())
+    alpha = alpha.to(device)#cuda() #gpu) #if use_cuda else alpha
+
+    interpolates = alpha * real_data + ((1 - alpha) * fake_data)
+
+
+    interpolates = interpolates.to(device)#.cuda()
+    interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
+
+    disc_interpolates = netD(interpolates) 
+    disc_interpolates = disc_interpolates * normalized_mask
 
     gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
                               grad_outputs=torch.ones(disc_interpolates.size()).to(device),#.cuda(), #if use_cuda else torch.ones(
@@ -198,6 +221,22 @@ def adjust_scales2image(real_,opt):
     scale2stop = math.ceil(math.log(min([opt.max_size, max([real_.shape[2], real_.shape[3]])]) / max([real_.shape[2], real_.shape[3]]),opt.scale_factor_init))
     opt.stop_scale = opt.num_scales - scale2stop
     opt.scale1 = min(opt.max_size / max([real_.shape[2], real_.shape[3]]),1)  # min(250/max([real_.shape[0],real_.shape[1]]),1)
+    #taking spare pixels for mask in case needed
+    opt.mask_coords[::2] = np.floor(np.array(opt.mask_coords[::2]).astype(np.float) * opt.scale1)
+    opt.mask_coords[1::2] = np.ceil(np.array(opt.mask_coords[1::2]).astype(np.float) * opt.scale1)
+    real = imresize(real_, opt.scale1, opt)
+    #opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
+    opt.scale_factor = math.pow(opt.min_size/(min(real.shape[2],real.shape[3])),1/(opt.stop_scale))
+    scale2stop = math.ceil(math.log(min([opt.max_size, max([real_.shape[2], real_.shape[3]])]) / max([real_.shape[2], real_.shape[3]]),opt.scale_factor_init))
+    opt.stop_scale = opt.num_scales - scale2stop
+    return real
+
+def adjust_scales2image_RS(real_,opt):
+    #opt.num_scales = int((math.log(math.pow(opt.min_size / (real_.shape[2]), 1), opt.scale_factor_init))) + 1
+    opt.num_scales = math.ceil((math.log(math.pow(opt.min_size / (min(real_.shape[2], real_.shape[3])), 1), opt.scale_factor_init))) + 1
+    scale2stop = math.ceil(math.log(min([opt.max_size, max([real_.shape[2], real_.shape[3]])]) / max([real_.shape[2], real_.shape[3]]),opt.scale_factor_init))
+    opt.stop_scale = opt.num_scales - scale2stop
+    opt.scale1 = min(opt.max_size / max([real_.shape[2], real_.shape[3]]),1)  # min(250/max([real_.shape[0],real_.shape[1]]),1)
     real = imresize(real_, opt.scale1, opt)
     #opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
     opt.scale_factor = math.pow(opt.min_size/(min(real.shape[2],real.shape[3])),1/(opt.stop_scale))
@@ -226,6 +265,16 @@ def creat_reals_pyramid(real,reals,opt):
         reals.append(curr_real)
     return reals
 
+def create_masks_pyramid(real,masks,opt):
+    real = real[:,0:3,:,:]
+    for i in range(0,opt.stop_scale+1,1):
+        scale = math.pow(opt.scale_factor,opt.stop_scale-i)
+        curr_real = imresize(real,scale,opt)
+        curr_mask = torch.ones_like(curr_real)
+        curr_coords = [int(np.ceil(coord*scale)) for coord in opt.mask_coords]
+        curr_mask[:, :, curr_coords[0]:curr_coords[1], curr_coords[2]:curr_coords[3]] = 0
+        masks.append(curr_mask)
+    return masks
 
 def load_trained_pyramid(opt, mode_='train'):
     #dir = 'TrainedModels/%s/scale_factor=%f' % (opt.input_name[:-4], opt.scale_factor_init)
