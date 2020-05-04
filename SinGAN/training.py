@@ -8,7 +8,7 @@ import math
 import matplotlib.pyplot as plt
 from SinGAN.imresize import imresize
 
-def train(opt,Gs,Zs,reals,NoiseAmp):
+def train(opt,Gs,Zs,reals,masks,NoiseAmp):
     real_ = functions.read_image(opt)
     in_s = 0
     scale_num = 0
