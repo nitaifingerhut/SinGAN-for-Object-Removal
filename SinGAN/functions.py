@@ -13,6 +13,7 @@ from SinGAN.imresize import imresize
 import os
 import random
 from sklearn.cluster import KMeans
+import torchvision.utils as vutils
 
 
 # custom weights initialization called on netG and netD
@@ -124,7 +125,7 @@ def move_to_cpu(t):
     t = t.to(torch.device('cpu'))
     return t
 
-def calc_gp(netD, real_data, fake_data, LAMBDA, device):
+def calc_gradient_penalty(netD, real_data, fake_data, LAMBDA, device, norm_discriminators_mask):
     #print real_data.size()
     alpha = torch.rand(1, 1)
     alpha = alpha.expand(real_data.size())
@@ -137,29 +138,7 @@ def calc_gp(netD, real_data, fake_data, LAMBDA, device):
     interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
 
     disc_interpolates = netD(interpolates)
-
-    gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
-                              grad_outputs=torch.ones(disc_interpolates.size()).to(device),#.cuda(), #if use_cuda else torch.ones(
-                                  #disc_interpolates.size()),
-                              create_graph=True, retain_graph=True, only_inputs=True)[0]
-    #LAMBDA = 1
-    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * LAMBDA
-    return gradient_penalty
-
-def calc_normalized_gp(netD, real_data, fake_data, LAMBDA, device, normalized_mask):
-    #print real_data.size()
-    alpha = torch.rand(1, 1)
-    alpha = alpha.expand(real_data.size())
-    alpha = alpha.to(device)#cuda() #gpu) #if use_cuda else alpha
-
-    interpolates = alpha * real_data + ((1 - alpha) * fake_data)
-
-
-    interpolates = interpolates.to(device)#.cuda()
-    interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
-
-    disc_interpolates = netD(interpolates) 
-    disc_interpolates = disc_interpolates * normalized_mask
+    disc_interpolates = disc_interpolates*norm_discriminators_mask
 
     gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
                               grad_outputs=torch.ones(disc_interpolates.size()).to(device),#.cuda(), #if use_cuda else torch.ones(
@@ -222,8 +201,9 @@ def adjust_scales2image(real_,opt):
     opt.stop_scale = opt.num_scales - scale2stop
     opt.scale1 = min(opt.max_size / max([real_.shape[2], real_.shape[3]]),1)  # min(250/max([real_.shape[0],real_.shape[1]]),1)
     #taking spare pixels for mask in case needed
-    opt.mask_coords[::2] = np.floor(np.array(opt.mask_coords[::2]).astype(np.float) * opt.scale1)
-    opt.mask_coords[1::2] = np.ceil(np.array(opt.mask_coords[1::2]).astype(np.float) * opt.scale1)
+    if opt.mode != 'random_samples':
+        opt.mask_coords[::2] = np.floor(np.array(opt.mask_coords[::2]).astype(np.float) * opt.scale1)
+        opt.mask_coords[1::2] = np.ceil(np.array(opt.mask_coords[1::2]).astype(np.float) * opt.scale1)
     real = imresize(real_, opt.scale1, opt)
     #opt.scale_factor = math.pow(opt.min_size / (real.shape[2]), 1 / (opt.stop_scale))
     opt.scale_factor = math.pow(opt.min_size/(min(real.shape[2],real.shape[3])),1/(opt.stop_scale))
@@ -257,7 +237,7 @@ def adjust_scales2image_SR(real_,opt):
     opt.stop_scale = opt.num_scales - scale2stop
     return real
 
-def creat_reals_pyramid(real,reals,opt):
+def create_reals_pyramid(real,reals,opt):
     real = real[:,0:3,:,:]
     for i in range(0,opt.stop_scale+1,1):
         scale = math.pow(opt.scale_factor,opt.stop_scale-i)
@@ -284,10 +264,10 @@ def load_trained_pyramid(opt, mode_='train'):
         opt.mode = mode
     dir = generate_dir2save(opt)
     if(os.path.exists(dir)):
-        Gs = torch.load('%s/Gs.pth' % dir)
-        Zs = torch.load('%s/Zs.pth' % dir)
-        reals = torch.load('%s/reals.pth' % dir)
-        NoiseAmp = torch.load('%s/NoiseAmp.pth' % dir)
+        Gs       = torch.load('%s/Gs.pth'       % dir, map_location=opt.device)
+        Zs       = torch.load('%s/Zs.pth'       % dir, map_location=opt.device)
+        reals    = torch.load('%s/reals.pth'    % dir, map_location=opt.device)
+        NoiseAmp = torch.load('%s/NoiseAmp.pth' % dir, map_location=opt.device)
     else:
         print('no appropriate trained model is exist, please train first')
     opt.mode = mode
@@ -305,13 +285,18 @@ def generate_in2coarsest(reals,scale_v,scale_h,opt):
 def generate_dir2save(opt):
     dir2save = None
     if (opt.mode == 'train') | (opt.mode == 'SR_train'):
-        dir2save = 'TrainedModels/%s/scale_factor=%f,alpha=%d' % (opt.input_name[:-4], opt.scale_factor_init,opt.alpha)
+        dir2save = 'TrainedModels/%s/scale_factor=%f,alpha=%d,min_size=%d,max_size=%d' % \
+                   (opt.input_name[:-4], opt.scale_factor_init,opt.alpha,opt.min_size,opt.max_size)
     elif (opt.mode == 'animation_train') :
         dir2save = 'TrainedModels/%s/scale_factor=%f_noise_padding' % (opt.input_name[:-4], opt.scale_factor_init)
     elif (opt.mode == 'paint_train') :
         dir2save = 'TrainedModels/%s/scale_factor=%f_paint/start_scale=%d' % (opt.input_name[:-4], opt.scale_factor_init,opt.paint_start_scale)
     elif opt.mode == 'random_samples':
-        dir2save = '%s/RandomSamples/%s/gen_start_scale=%d' % (opt.out,opt.input_name[:-4], opt.gen_start_scale)
+        # dir2save = '%s/RandomSamples/%s,min_size=%d,max_size=%d/gen_start_scale=%d' % \
+        #            (opt.out, opt.input_name[:-4], opt.min_size, opt.max_size, opt.gen_start_scale)
+        dir2save = os.path.join('%s/RandomSamples' % opt.out, '/'.join(opt.model_dir.split('/')[1:]),
+                                'gen_start_scale=%d' % opt.gen_start_scale)
+        # print(f'[I] - dir2save={dir2save}')
     elif opt.mode == 'random_samples_arbitrary_sizes':
         dir2save = '%s/RandomSamples_ArbitrerySizes/%s/scale_v=%f_scale_h=%f' % (opt.out,opt.input_name[:-4], opt.scale_v, opt.scale_h)
     elif opt.mode == 'animation':
@@ -342,7 +327,7 @@ def post_config(opt):
 
     if opt.manualSeed is None:
         opt.manualSeed = random.randint(1, 10000)
-    print("Random Seed: ", opt.manualSeed)
+    # print("Random Seed: ", opt.manualSeed)
     random.seed(opt.manualSeed)
     torch.manual_seed(opt.manualSeed)
     if torch.cuda.is_available() and opt.not_cuda:
@@ -383,7 +368,6 @@ def quant2centers(paint, centers):
 
     return paint
 
-
 def dilate_mask(mask,opt):
     if opt.mode == "harmonization":
         element = morphology.disk(radius=7)
@@ -402,4 +386,10 @@ def dilate_mask(mask,opt):
     mask = (mask-mask.min())/(mask.max()-mask.min())
     return mask
 
-
+def plot_minibatch(minibatch: torch.Tensor, title, opt):
+    plt.figure(figsize=(12, 12))
+    plt.axis("off")
+    if title:
+        plt.title(title)
+    plt.imshow(np.transpose(vutils.make_grid(minibatch.to(opt.device), normalize=True).cpu(), (1, 2, 0)))
+    plt.show()

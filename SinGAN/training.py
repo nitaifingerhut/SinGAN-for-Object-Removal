@@ -5,7 +5,9 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data
 import math
+import torch
 import matplotlib.pyplot as plt
+import pickle
 from SinGAN.imresize import imresize
 
 def train(opt,Gs,Zs,reals,masks,NoiseAmp):
@@ -13,7 +15,7 @@ def train(opt,Gs,Zs,reals,masks,NoiseAmp):
     in_s = 0
     scale_num = 0
     real = imresize(real_,opt.scale1,opt)
-    reals = functions.creat_reals_pyramid(real,reals,opt)
+    reals = functions.create_reals_pyramid(real,reals,opt)
     masks = functions.create_masks_pyramid(real,masks,opt)
     nfc_prev = 0
 
@@ -64,6 +66,7 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
 
     real = reals[len(Gs)]
     mask = masks[len(Gs)]
+
     opt.nzx = real.shape[2]#+(opt.ker_size-1)*(opt.num_layer)
     opt.nzy = real.shape[3]#+(opt.ker_size-1)*(opt.num_layer)
     opt.receptive_field = opt.ker_size + ((opt.ker_size-1)*(opt.num_layer-1))*opt.stride
@@ -90,8 +93,6 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
     _, _, h, w = mask.size()
     discriminators_mask = mask.detach()[:,:,r:h-r,r:w-r][:,0,:,:].unsqueeze(0)
     _, _, h, w = discriminators_mask.size()
-    m_ratio = (h * w) / discriminators_mask.sum().item()
-    discriminators_mask = discriminators_mask * m_ratio # normalize the discriminators mask
 
     fixed_noise = functions.generate_noise([opt.nc_z,opt.nzx,opt.nzy],device=opt.device)
     z_opt = torch.full(fixed_noise.shape, 0, device=opt.device)
@@ -103,13 +104,18 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
     schedulerD = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizerD,milestones=[1600],gamma=opt.gamma)
     schedulerG = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizerG,milestones=[1600],gamma=opt.gamma)
 
-    errD2plot = []
-    errG2plot = []
+    errD2plot   = []
+    errG2plot   = []
     D_real2plot = []
     D_fake2plot = []
-    z_opt2plot = []
+    z_opt2plot  = []
+    norm        = []
+
+    norm.append(1)
+    norm.append((h*w)/discriminators_mask.sum().item())
 
     plt.imsave('%s/mask.png'   % (opt.outf), functions.convert_image_np(real*mask))
+
     for epoch in range(opt.niter):
         if (Gs == []) & (opt.mode != 'SR_train'):
             if (epoch == 0):
@@ -127,15 +133,10 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
         for j in range(opt.Dsteps):
             # train with real
             netD.zero_grad()
-
-            if opt.norm == 0:
-                output = netD(real).to(opt.device)
-            elif opt.norm == 1:
-                output = netD(real).to(opt.device) * discriminators_mask
-            else:
-                raise TypeError("valid normalization modes are 0,1.")
-            #D_real_map = output.detach()
-            errD_real = -output.mean()#-a
+            output = netD(real).to(opt.device)
+            output = output*discriminators_mask
+            D_real_map = output.detach()
+            errD_real = -(output.mean())*norm[opt.norm] #-a
             errD_real.backward(retain_graph=True)
             D_x = -errD_real.item()
 
@@ -182,19 +183,12 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
             errD_fake.backward(retain_graph=True)
             D_G_z = output.mean().item()
 
-            if opt.norm == 0:
-                gradient_penalty = functions.calc_gp(netD, real, fake, opt.lambda_grad, opt.device)
-            elif opt.norm == 1:
-                gradient_penalty = functions.calc_normalized_gp(netD, real, fake, opt.lambda_grad, opt.device, discriminators_mask)
-            else:
-                raise TypeError("valid normalization modes are 0,1.")
-
+            gradient_penalty = functions.calc_gradient_penalty(netD, real, fake, opt.lambda_grad, opt.device, discriminators_mask*norm[opt.norm])
             gradient_penalty.backward()
 
             errD = errD_real + errD_fake + gradient_penalty
             optimizerD.step()
 
-        errD2plot.append(errD.detach())
 
         ############################
         # (2) Update G network: maximize D(G(z))
@@ -203,7 +197,7 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
         for j in range(opt.Gsteps):
             netG.zero_grad()
             output = netD(fake)
-            #D_fake_map = output.detach()
+            D_fake_map = output.detach()
             errG = -output.mean()
             errG.backward(retain_graph=True)
             if alpha!=0:
@@ -213,13 +207,8 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
                     plt.imsave('%s/z_prev.png' % (opt.outf), functions.convert_image_np(z_prev), vmin=0, vmax=1)
                 Z_opt = opt.noise_amp*z_opt+z_prev
                 netG_out = netG(Z_opt.detach(),z_prev)
-                if opt.norm == 0:
-                    pass
-                elif opt.norm == 1:
-                    netG_out = netG_out * mask
-                    real = real * mask
-                else:
-                    raise TypeError("valid normalization modes are 0,1.")
+                netG_out = netG_out*mask
+                real = real*mask
                 rec_loss = alpha*loss(netG_out,real)
                 rec_loss.backward(retain_graph=True)
                 rec_loss = rec_loss.detach()
@@ -229,7 +218,8 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
 
             optimizerG.step()
 
-        errG2plot.append(errG.detach()+rec_loss)
+        errD2plot.append(errD.detach())
+        errG2plot.append(errG.detach())
         D_real2plot.append(D_x)
         D_fake2plot.append(D_G_z)
         z_opt2plot.append(rec_loss)
@@ -240,8 +230,8 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
         if epoch % 500 == 0 or epoch == (opt.niter-1):
             plt.imsave('%s/fake_sample.png' %  (opt.outf), functions.convert_image_np(fake.detach()), vmin=0, vmax=1)
             plt.imsave('%s/G(z_opt).png'    % (opt.outf),  functions.convert_image_np(netG(Z_opt.detach(), z_prev).detach()), vmin=0, vmax=1)
-            #plt.imsave('%s/D_fake.png'   % (opt.outf), functions.convert_image_np(D_fake_map))
-            #plt.imsave('%s/D_real.png'   % (opt.outf), functions.convert_image_np(D_real_map))
+            plt.imsave('%s/D_fake.png'   % (opt.outf), functions.convert_image_np(D_fake_map))
+            plt.imsave('%s/D_real.png'   % (opt.outf), functions.convert_image_np(D_real_map))
             #plt.imsave('%s/z_opt.png'    % (opt.outf), functions.convert_image_np(z_opt.detach()), vmin=0, vmax=1)
             #plt.imsave('%s/prev.png'     %  (opt.outf), functions.convert_image_np(prev), vmin=0, vmax=1)
             #plt.imsave('%s/noise.png'    %  (opt.outf), functions.convert_image_np(noise), vmin=0, vmax=1)
@@ -250,11 +240,27 @@ def train_single_scale(netD,netG,reals,masks,Gs,Zs,in_s,NoiseAmp,opt,centers=Non
 
             torch.save(z_opt, '%s/z_opt.pth' % (opt.outf))
 
+            with open('%s/D_real2plot' % (opt.outf), "wb") as fp:  # Pickling
+                pickle.dump(D_real2plot, fp)
+            with open('%s/D_fake2plot' % (opt.outf), "wb") as fp:  # Pickling
+                pickle.dump(D_fake2plot, fp)
+            # with open('%s/D_real2plot' % (opt.outf), "rb") as fp:  # Unpickling
+            #     D_fake2plot = pickle.load(fp)
+
+            with open('%s/errD2plot' % (opt.outf), "wb") as fp:  # Pickling
+                pickle.dump(errD2plot, fp)
+            with open('%s/errG2plot' % (opt.outf), "wb") as fp:  # Pickling
+                pickle.dump(errG2plot, fp)
+            with open('%s/z_opt2plot' % (opt.outf), "wb") as fp:  # Pickling
+                pickle.dump(z_opt2plot, fp)
+
+
         schedulerD.step()
         schedulerG.step()
 
+    # plt.imsave('%s/masked_img.png'   % (opt.outf), functions.convert_image_np(real*mask))
     functions.save_networks(netG,netD,z_opt,opt)
-    return z_opt,in_s,netG    
+    return z_opt,in_s,netG
 
 def draw_concat(Gs,Zs,reals,NoiseAmp,in_s,mode,m_noise,m_image,opt):
     G_z = in_s

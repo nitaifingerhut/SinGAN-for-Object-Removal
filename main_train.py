@@ -23,13 +23,15 @@ if __name__ == '__main__':
     parser.add_argument('--input_dir', help='input image dir', default='Input/Images')
     parser.add_argument('--input_name', help='input image name', required=True)
     parser.add_argument('--mode', help='task to be done', default='train')
-    parser.add_argument('--norm', default='0', type=ParseNorm, 
+    parser.add_argument('--norm', default='0', type=ParseNorm,
                         help="normalization mode: \n"
-                        "0:none, 1:normalize. ")
+                             "0:none, 1:normalize ")
     parser.add_argument('--mask_coords', type=ParseCoords,
                         help="Mask's coordinates in format of: (y0,y1),(x0,x1), \n"
                              "where: y0, y1 are longitude coordinates \n"
                              "       x1, y1 are latitude coordinates. ")
+    parser.add_argument('--plotting', action='store_true', default=False)
+
     opt = parser.parse_args()
     opt = functions.post_config(opt)
     Gs = []
